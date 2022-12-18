@@ -1,21 +1,12 @@
 #include <Arduino.h>
+#include <.env.h>
+#include <env_default.h>
 #include <SPI.h>
 #include <EEPROM.h>
 #include <EthernetENC.h>
+#include <PubSubClient.h>
 #include <Watchdog.h>
-#include "zfont5x8.cpp"
-
-#define ETHERNET_SELECT_PIN 10
-#define SERIAL_BAUD 115200
-// #define SERIAL_EN
-#define DEBUG_SERVER
-
-#define EEPROM_BOOT_COUNT 0x00
-//#define SET_BOOT_COUNT 0
-
-#define LOW_NIBBLE 0x0f
-#define HIGH_NIBBLE 0xf0
-#define MHZ 1000000
+#include <zfont5x8.cpp>
 
 #define MX_NOOP 0x00
 #define MX_DIG_0 0x01
@@ -97,46 +88,13 @@
 #define BTN_READ (BTN_PIN & BTN_BITMASK)
 #define BTN_INPUT BTN_DDR &= ~BTN_BITMASK
 #define BTN_PULLUP BTN_PORT |= BTN_BITMASK
-#define BTN_DEBOUNCE_COUNTDOWN_START 32
+#define BTN_DEBOUNCE_COUNTDOWN_START 4
 
 #define PROGRAM_ID_INIT 0
 #define PROGRAM_ID_MAX 10
 #define PROGRAM_ID_EEPROM 0x08
 #define PROGRAM_VALUES_EEPROM 0x10
 #define PROGRAM_SIZE 4
-
-#define PAGE_PREVIOUS_CHAR_INIT 0x00
-#define PAGE_CHAR_INIT 0x00
-
-#define PAGE_CHAR_POS_INIT 0x00
-#define PAGE_CHAR_POS_MAX 0xff
-
-#define PAGE_STORE 0x80
-#define PAGE_GET 0x40
-#define PAGE_BLUE 0x20
-#define PAGE_GREEN 0x10
-#define PAGE_RED 0x08
-#define PAGE_DISPLAY_INTENSITY 0x04
-#define PAGE_L2 0x02
-#define PAGE_L1 0x01
-#define PAGE_INIT 0x00
-
-#define PAGE_SWITCH_PROGRAM 0x20
-#define PAGE_SWITCH_INTENSITY 0x10
-#define PAGE_SWITCH_TEXT 0x08
-#define PAGE_SWITCH_L 0x04
-#define PAGE_SWITCH_PATH 0x02
-#define PAGE_SWITCH_BLANK_LINE 0x01
-#define PAGE_SWITCH_INIT 0x00;
-
-#define SERV_OK 0x08
-#define SERV_SERVICE_UNAVAILABLE 0x04
-#define SERV_NOT_FOUND 0x02
-#define SERV_BAD_REQUEST 0x01
-#define SERV_NONE 0x00
-
-#define SERV_ERR 0x01
-#define SERV_UNDEFINED 0x00
 
 #define CYCLES_MICROSEC (F_CPU / 1000000)
 
@@ -148,10 +106,16 @@ inline static void nops(){
 }
 template<> inline void nops<0>(){};
 
-const byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xEE};
-const IPAddress ip(10, 200, 125, 81);
-// const IPAddress ip(192, 168, 1, 181);
-EthernetServer server(80);
+const byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
+const IPAddress selfIp(SELF_IP);
+const IPAddress mqttServerIp(MQTT_SERVER_IP);
+
+EthernetClient ethClient;
+PubSubClient mqttClient(ethClient);
+uint32_t mqttLastReconnectAttempt = 0;
+uint32_t lastPresence = 0;
+uint32_t lastWaterTemp = 0;
+uint32_t lastAirTemp = 0;
 
 Watchdog watchdog;
 
@@ -169,38 +133,51 @@ uint32_t mxLastRequest = 0;
 uint16_t mxInterval = 0;
 
 uint8_t mxMatrix[MX_SCREEN_COUNT][MX_DISPLAY_COUNT][MX_DEVICE_COUNT][MX_ROW_COUNT];
-char mxChar[MX_CHAR_COUNT] = MX_CHAR_INIT;
+char mxChar[MX_CHAR_COUNT];
 uint8_t mxScreen = MX_SCREEN_DATA;
 
-uint32_t bootCount;
-
-uint8_t prevClientChar;
-uint8_t clientChar;
-uint8_t clientCharPos;
-uint8_t pageSwitch;
-uint8_t page;
-uint8_t serv;
-
 uint8_t btnCount = BTN_DEBOUNCE_COUNTDOWN_START;
+uint8_t btnLastRead = BTN_BITMASK;
 
 const uint8_t* adr;
 
-inline void eepromU32Put(uint16_t location, uint8_t index, uint32_t data){
-  EEPROM.put(location + (index * 4), data);
+inline void mxCharInit(){
+  mxChar[0] = '.';
+  mxChar[1] = '\0';
 }
 
-inline uint32_t eepromU32Get(uint16_t location, uint8_t index){
-  uint32_t data;
-  EEPROM.get(location + (index * 4), data);
-  return data;
+inline void mxCharEmpty(){
+  mxChar[0] = '>';
+  mxChar[1] = '\0';
 }
 
-inline uint32_t eepromU32Inc(uint16_t location, uint8_t index){
-  uint32_t data;
-  data = eepromU32Get(location, index);
-  data++;
-  eepromU32Put(location, index, data);
-  return data;
+inline void mxCharNoConnection(){
+  mxChar[0] = 'n';
+  mxChar[1] = '\0';
+}
+
+inline void getProgramValuesFromEeprom(){
+  uint8_t adr = PROGRAM_VALUES_EEPROM + (programId * 4);
+  EEPROM.get(adr, mxIntensity);
+  EEPROM.get(adr + 1, wsRed);
+  EEPROM.get(adr + 2, wsGreen);
+  EEPROM.get(adr + 3, wsBlue);
+}
+
+inline void putProgramValuesToEeprom(){
+  uint8_t adr = PROGRAM_VALUES_EEPROM + (programId * 4);
+  EEPROM.put(adr, mxIntensity);
+  EEPROM.put(adr + 1, wsRed);
+  EEPROM.put(adr + 2, wsGreen);
+  EEPROM.put(adr + 3, wsBlue);
+}
+
+inline void getProgramIdFromEeprom(){
+  EEPROM.get(PROGRAM_ID_EEPROM, programId);
+}
+
+inline void putProgramIdToEeprom(){
+  EEPROM.put(PROGRAM_ID_EEPROM, programId);
 }
 
 inline void wsWriteColor(uint8_t wsColor){
@@ -337,30 +314,6 @@ inline void mxCalcPixelMatrix(uint8_t screen, uint8_t display){
   }
 }
 
-inline void getProgramValuesFromEeprom(){
-  uint8_t adr = PROGRAM_VALUES_EEPROM + (programId * 4);
-  EEPROM.get(adr, mxIntensity);
-  EEPROM.get(adr + 1, wsRed);
-  EEPROM.get(adr + 2, wsGreen);
-  EEPROM.get(adr + 3, wsBlue);
-}
-
-inline void putProgramValuesToEeprom(){
-  uint8_t adr = PROGRAM_VALUES_EEPROM + (programId * 4);
-  EEPROM.put(adr, mxIntensity);
-  EEPROM.put(adr + 1, wsRed);
-  EEPROM.put(adr + 2, wsGreen);
-  EEPROM.put(adr + 3, wsBlue);
-}
-
-inline void getProgramIdFromEeprom(){
-  EEPROM.get(PROGRAM_ID_EEPROM, programId);
-}
-
-inline void putProgramIdToEeprom(){
-  EEPROM.put(PROGRAM_ID_EEPROM, programId);
-}
-
 inline void mxCalcProgramPixelMatrix(uint8_t display){
   mxChar[0] = '.';
   mxChar[1] = '.';
@@ -370,7 +323,7 @@ inline void mxCalcProgramPixelMatrix(uint8_t display){
   } else {
     mxChar[3] = '.';
   }
-  mxChar[4] = MX_CHAR_EMPTY;
+  mxChar[4] = '\0';
 
   #ifdef MX_DISPLAY_REVERSE
     if (display == MX_DISPLAY_L1){
@@ -388,32 +341,169 @@ inline void mxCalcProgramPixelMatrix(uint8_t display){
 }
 
 inline void btnRead(){
-  if (BTN_READ){
-    if (btnCount == BTN_DEBOUNCE_COUNTDOWN_START){
-      // trigger to normal operation
-      mxScreen = MX_SCREEN_DATA;
-      mxInterval = 0;
-    }
+  uint8_t btnNewRead;
 
-    if (btnCount){
-      btnCount--;
-    }
-  } else {
-    if (!btnCount){
-      // trigger "btn on", next program
-      programId++;
-      if (programId == PROGRAM_ID_MAX){
-        programId = 0;
-      }
-      putProgramIdToEeprom();
-      getProgramValuesFromEeprom();
-      mxCalcProgramPixelMatrix(MX_DISPLAY_L2);
-      mxScreen = MX_SCREEN_PROGRAM;
-      mxInterval = 0;
-      wsInterval = 0;
-    }
+  if (btnCount){
+    btnCount--;
+    return;
+  }
 
-    btnCount = BTN_DEBOUNCE_COUNTDOWN_START;
+  btnNewRead = BTN_READ;
+
+  if (!(btnNewRead^btnLastRead)){
+    // no difference
+    return;
+  }
+
+  btnCount = BTN_DEBOUNCE_COUNTDOWN_START;
+  btnLastRead = btnNewRead;
+  
+  if (btnNewRead){
+    // btn release
+    // resume normal screen data
+    mxScreen = MX_SCREEN_DATA;
+    mxInterval = 0;
+    return;
+  } 
+
+  // trigger "btn on", next program
+  programId++;
+  if (programId == PROGRAM_ID_MAX){
+    programId = 0;
+  }
+  putProgramIdToEeprom();
+  getProgramValuesFromEeprom();
+  mxCalcProgramPixelMatrix(MX_DISPLAY_L2);
+  mxScreen = MX_SCREEN_PROGRAM;
+  mxInterval = 0;
+  wsInterval = 0;
+}
+
+bool mqttReconnect() {
+  String clientId = CLIENT_ID_PREFIX;
+  clientId += String(random(0xffff), HEX);
+  if (mqttClient.connect(clientId.c_str())) {
+    mqttClient.subscribe(SUB_SET_INTENSITY);
+    mqttClient.subscribe(SUB_SET_RED);
+    mqttClient.subscribe(SUB_SET_GREEN);
+    mqttClient.subscribe(SUB_SET_BLUE);
+    mqttClient.subscribe(SUB_SELECT_PROGRAM);
+    mqttClient.subscribe(SUB_STORE);
+    mqttClient.subscribe(SUB_WATER_TEMP);
+    mqttClient.subscribe(SUB_AIR_TEMP);
+  }
+  return mqttClient.connected();
+}
+
+void formatTemp(char* temp){
+  float fl;
+  int16_t int_t;
+  uint8_t len;
+
+  fl = atof(temp);
+  int_t = round(fl * 10);
+  itoa(int_t, mxChar, 10);
+  len = strlen(mxChar);
+  mxChar[len + 1] = '\0';
+  mxChar[len] = mxChar[len - 1];
+  mxChar[len - 1] = ',';
+}
+
+inline void mxCalcDataLine1(){
+  #ifdef MX_DISPLAY_REVERSE
+    mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L2);            
+  #else 
+    mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L1);                
+  #endif 
+}
+
+inline void mxCalcDataLine2(){
+  #ifdef MX_DISPLAY_REVERSE
+    mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L1);            
+  #else 
+    mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L2);                
+  #endif 
+}
+
+void mqttCallback(char* topic, char* payload, unsigned int length) {
+  #ifdef SERIAL_EN
+    uint8_t iii;
+    Serial.print("sub rec: ");
+    Serial.print(topic);
+    Serial.print(" : ");
+    for (iii = 0; iii < length; iii++) {
+      Serial.print(payload[iii]);
+    }
+  #endif
+
+  if (strcmp(topic, SUB_WATER_TEMP) == 0){
+    formatTemp(payload);
+    mxCalcDataLine1();
+    mxInterval = 0;
+    lastWaterTemp = millis();
+    return;
+  }
+
+  if (strcmp(topic, SUB_AIR_TEMP) == 0){
+    formatTemp(payload);
+    mxCalcDataLine2();
+    mxInterval = 0;  
+    lastAirTemp = millis();
+    return;
+  }
+
+  if (strcmp(topic, SUB_SET_INTENSITY) == 0){
+    mxIntensity = atoi(payload);
+    mxInterval = 0;
+    return;
+  }
+
+  if (strcmp(topic, SUB_SET_RED) == 0){
+    wsRed = atoi(payload);
+    wsInterval = 0;
+    return;
+  }
+
+  if (strcmp(topic, SUB_SET_GREEN) == 0){
+    wsGreen = atoi(payload);
+    wsInterval = 0;
+    return;
+  }
+
+  if (strcmp(topic, SUB_SET_BLUE) == 0){
+    wsBlue = atoi(payload);
+    wsInterval = 0;
+    return;
+  }
+
+  if (strcmp(topic, SUB_SELECT_PROGRAM) == 0){
+    if (payload[0] < '0'){
+      return;
+    }
+    if (payload[0] > '9'){
+      return;
+    }
+    programId = (uint8_t) (payload[0] - '0');
+    putProgramIdToEeprom();
+    getProgramValuesFromEeprom();
+    wsInterval = 0;
+    mxInterval = 0;
+    return;
+  }
+
+  if (strcmp(topic, SUB_STORE) == 0){
+    if (payload[0] < '0'){
+      return;
+    }
+    if (payload[0] > '9'){
+      return;
+    }
+    programId = (uint8_t) (payload[0] - '0');
+    putProgramIdToEeprom();    
+    putProgramValuesToEeprom();
+    wsInterval = 0;
+    mxInterval = 0;
+    return;
   }
 }
 
@@ -427,9 +517,12 @@ void setup() {
   BTN_PULLUP;
   delay(200);
 
-  Ethernet.init(ETHERNET_SELECT_PIN);
+  mqttClient.setServer(mqttServerIp, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  Ethernet.init(ETH_CS_PIN);
   SPI.begin();
-  Ethernet.begin(mac, ip);
+  Ethernet.begin(mac, selfIp);
+
 #ifdef SERIAL_EN
   Serial.begin(SERIAL_BAUD);
   while (!Serial) {
@@ -456,24 +549,11 @@ void setup() {
   }
 #endif 
 
-  server.begin();
+  mqttReconnect();
 
-#ifdef SET_BOOT_COUNT
-  bootCount = SET_BOOT_COUNT;
-#else
-  bootCount = eepromU32Get(EEPROM_BOOT_COUNT, 0);
-  bootCount++;   
-#endif
-
-  eepromU32Put(EEPROM_BOOT_COUNT, 0, bootCount);  
-
-#ifdef SERIAL_EN
-  Serial.print("Boot count: ");
-  Serial.println(bootCount);
-#endif
-
-  mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L1);
-  mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L2);
+  mxCharInit();
+  mxCalcDataLine1();
+  mxCalcDataLine2();
 
   getProgramIdFromEeprom();
   getProgramValuesFromEeprom();
@@ -486,13 +566,13 @@ void setup() {
   mxLastRequest = millis();
   wsInterval = 0;
   mxInterval = 0;
-  watchdog.enable(Watchdog::TIMEOUT_4S);
+
+  #ifdef WATCHDOG_EN
+    watchdog.enable(Watchdog::TIMEOUT_4S);
+  #endif
 }
 
 void loop() {
-  uint8_t intensity;
-  uint8_t strLen;
-
   watchdog.reset();
 
   btnRead();
@@ -520,321 +600,60 @@ void loop() {
 
   btnRead();
 
-  /**
-   * Listen ethernet clients
-   */
-
   Ethernet.maintain();
 
-  EthernetClient client = server.available();
+  btnRead();
 
-  if (!client) {
-    return;
-  }
+  if (mqttClient.connected()) {
 
-#ifdef SERIAL_EN
-  Serial.println("HTTP ");
-  Serial.println("client >>");
-#endif
-
-  prevClientChar = PAGE_PREVIOUS_CHAR_INIT;
-  clientChar = PAGE_CHAR_INIT;
-  clientCharPos = PAGE_CHAR_POS_INIT;
-  pageSwitch = PAGE_SWITCH_INIT;
-  page = PAGE_INIT;
-  serv = SERV_UNDEFINED;
-  mxChar[0] = MX_CHAR_EMPTY;
-
-  while (client.connected()) {
-    if (!client.available()) {
-      continue;
+    if (millis() - lastPresence > PRESENCE_TIME){
+      mqttClient.publish(PUB_PRESENCE, "1");
+      lastPresence = millis();
     }
 
-    clientChar = client.read();
+    btnRead();
 
-    if (clientCharPos < PAGE_CHAR_POS_MAX){
-      clientCharPos++;      
+    if (millis() - lastWaterTemp > WATER_TEMP_VALID_TIME){
+      mxCharEmpty();
+      mxCalcDataLine1();
+      mxInterval = 0;
     }
 
-#ifdef SERIAL_EN
-    Serial.print((char) clientChar);
-#endif
+    btnRead();
 
-    if (pageSwitch & PAGE_SWITCH_PATH){
+    if (millis() - lastAirTemp > AIR_TEMP_VALID_TIME){
+      mxCharEmpty();
+      mxCalcDataLine2();
+      mxInterval = 0;
+    }
 
-      pageSwitch &= ~PAGE_SWITCH_PATH; 
-     
-      switch (clientChar){
-        case 'l':
-        case 'L':
-          pageSwitch |= PAGE_SWITCH_L;
-          break;
-        case 'i':
-        case 'I':
-          pageSwitch |= PAGE_SWITCH_INTENSITY;
-          page |= PAGE_DISPLAY_INTENSITY;
-          break;
-        case 'r':
-        case 'R':
-          pageSwitch |= PAGE_SWITCH_INTENSITY;
-          page |= PAGE_RED;
-          break;
-        case 'g':
-        case 'G':
-          pageSwitch |= PAGE_SWITCH_INTENSITY;
-          page |= PAGE_GREEN;
-          break;
-        case 'b':
-        case 'B':
-          pageSwitch |= PAGE_SWITCH_INTENSITY;
-          page |= PAGE_BLUE;
-          break;
-        case 'w':
-        case 'W':
-          pageSwitch |= PAGE_SWITCH_INTENSITY;
-          page |= PAGE_RED;
-          page |= PAGE_GREEN;
-          page |= PAGE_BLUE;
-          break;
-        case 's': // store program (color intensities)
-        case 'S':
-          pageSwitch |= PAGE_SWITCH_PROGRAM;
-          page |= PAGE_STORE;
-          break;
-        case 'p': // get program (color intensities)
-        case 'P':
-          pageSwitch |= PAGE_SWITCH_PROGRAM;
-          page |= PAGE_GET;
-          break;
-        default:
-          serv |= SERV_NOT_FOUND;
-          break;
-      }
-      continue;
-    } 
-    
-    if (pageSwitch & PAGE_SWITCH_L){
-      switch (clientChar){
-        case '1':
-          page |= PAGE_L1;
-          break;
-        case '2':
-          page |= PAGE_L2;
-          break;
-        case '/':
-          pageSwitch &= ~PAGE_SWITCH_L;
-          pageSwitch |= PAGE_SWITCH_TEXT;
-        default:
-          pageSwitch &= ~PAGE_SWITCH_L;          
-          serv |= SERV_NOT_FOUND;          
-          break;
-      }
-      continue;
-    } 
-    
-    if (pageSwitch & PAGE_SWITCH_TEXT){
-      if (clientChar > 0x20 && clientChar <= 0xbf){
-        strLen = strlen(mxChar);
-        if (strLen < (sizeof(mxChar) - 1)){        
-          mxChar[strLen] = clientChar;
-          mxChar[strLen + 1] = MX_CHAR_EMPTY;
-        }
-      } else {
-        #ifdef MX_DISPLAY_REVERSE
-          if (page & PAGE_L1){
-            mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L2);            
-          } else {
-            mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L1);
-          }
-        #else 
-          if (page & PAGE_L1){
-            mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L1);            
-          } else {
-            mxCalcPixelMatrix(MX_SCREEN_DATA, MX_DISPLAY_L2);
-          }        
-        #endif 
+    btnRead();
 
-        serv = SERV_OK;
-        pageSwitch &= ~PAGE_SWITCH_TEXT; 
-        mxInterval = 0;
-      }
-      continue;
-    } 
+    mqttClient.loop();
+  } else {
 
-    if (pageSwitch & PAGE_SWITCH_INTENSITY){
-      intensity = 0xff;
-      switch (clientChar){
-        case '0' ... '9':
-          intensity = clientChar - '0';
-          break;
-        case 'a' ... 'f':
-          intensity = clientChar - 'a' + 10;
-          break;
-        case 'A' ... 'F':
-          intensity = clientChar - 'A' + 10;
-          break;
-        case '/':
-          break;
-        default:
-          serv |= SERV_NOT_FOUND;
-          pageSwitch &= ~PAGE_SWITCH_INTENSITY;
-          break;
-      }
+    mxCharNoConnection();
+    mxCalcDataLine1();
+    mxCalcDataLine2();
+    mxInterval = 0;
 
-      if (intensity != 0xff){
-        pageSwitch &= ~PAGE_SWITCH_INTENSITY;          
-        intensity = intensity << 4 | intensity;
+    if (millis() - mqttLastReconnectAttempt > MQTT_CONNECT_RETRY_TIME) {
+      if (mqttReconnect()) {
         #ifdef SERIAL_EN
-          Serial.print("intesity: ");
-          Serial.println(intensity, HEX);
+          Serial.println("connected");
         #endif
-        if (page & PAGE_RED){
-          wsRed = intensity;
-          wsInterval = 0;
-        }
-        if (page & PAGE_GREEN){
-          wsGreen = intensity;
-          wsInterval = 0;
-        }
-        if (page & PAGE_BLUE){
-          wsBlue = intensity;
-          wsInterval = 0;
-        }
-        if (page & PAGE_DISPLAY_INTENSITY){
-          mxIntensity = intensity;
-          mxInterval = 0;
-        }
-        serv |= SERV_OK;
+        mqttLastReconnectAttempt = 0;
+      } else {
+
+        #ifdef SERIAL_EN
+          Serial.print("failed, rc=");
+          Serial.print(mqttClient.state());
+          Serial.print(" try again in ");
+          Serial.print(MQTT_CONNECT_RETRY_TIME);
+          Serial.println(" ms.");
+        #endif
+        mqttLastReconnectAttempt = millis();
       }
-      continue;   
     }
-
-    if (pageSwitch & PAGE_SWITCH_PROGRAM){
-      switch (clientChar){
-        case '0' ... '9':
-          pageSwitch &= ~PAGE_SWITCH_PROGRAM;
-          programId = clientChar - '0';
-          putProgramIdToEeprom();
-          if (page & PAGE_STORE){
-            putProgramValuesToEeprom();
-          }
-          if (page & PAGE_GET){
-            getProgramValuesFromEeprom();
-            mxLastRequest = 0;
-            wsLastRequest = 0;
-          }
-          serv |= SERV_OK;
-          break;
-        case '/':
-          break;
-        default:
-          serv |= SERV_NOT_FOUND;
-          pageSwitch &= ~PAGE_SWITCH_PROGRAM;
-          break;
-      }
-      continue;
-    }
-    
-    if (serv == SERV_UNDEFINED){
-
-      if (clientCharPos < 5){
-        if (clientChar == "_GET "[clientCharPos]){
-          #ifdef SERIAL_EN
-            Serial.print(">B5>>> ");
-            Serial.println(clientChar);
-          #endif
-          continue;
-        }
-      } else if (clientChar == '/'){
-          pageSwitch |= PAGE_SWITCH_PATH;
-          continue;
-      }
-      #ifdef SERIAL_EN
-        Serial.print(">BadR>>> ");
-        Serial.println(clientChar);
-      #endif
-      serv = SERV_BAD_REQUEST;        
-    }
-
-    if (prevClientChar == '\n'){
-      pageSwitch |= PAGE_SWITCH_BLANK_LINE;
-    } else if (prevClientChar != '\r') {
-      pageSwitch &= ~PAGE_SWITCH_BLANK_LINE;
-    }
-
-    prevClientChar = clientChar;
-
-    if (clientChar != '\n'){
-      continue;
-    }    
-
-    if (~pageSwitch & PAGE_SWITCH_BLANK_LINE){
-      continue;
-    }
-
-    /**
-     * Serve page to client
-     */
-
-    client.print("HTTP/1.1");
-    client.print(" ");
-
-    if (serv & SERV_SERVICE_UNAVAILABLE){
-        client.print("503 ");
-        client.print("Service ");
-        client.print("Unavai");
-        client.println("lable");
-    } else if (serv & SERV_BAD_REQUEST) {  
-        client.print("400 Bad ");
-        client.println("Request");     
-    } else if (serv & SERV_NOT_FOUND) {
-        client.print("404 Not ");
-        client.println("Found");
-    } else if (serv & SERV_OK){
-      client.println("200 OK");
-
-    } else {
-        client.print("500 Inter");
-        client.print("nal Server ");
-        client.println("Error");        
-    }
-
-    client.print("Content-");
-    client.print("Type: ");
-    client.print("text/");
-    client.println("plain");
-    client.println();
-
-    if (serv & SERV_SERVICE_UNAVAILABLE){
-      client.print("503 ");
-      client.print("Service ");
-      client.print("Unavai");
-      client.print("lable");
-      break;
-    }
-
-    if (serv & SERV_BAD_REQUEST){
-      client.print("400 Bad ");
-      client.print("Request");
-      break;      
-    }
-
-    if (serv & SERV_NOT_FOUND){
-      client.print("404 Not ");
-      client.print("Found");
-      break;      
-    }
-
-    if (serv & SERV_OK){
-      client.print("Ok");
-      break;
-    }
-
-    client.print("500 Inter");
-    client.print("nal Server ");
-    client.print("Error");
   }
-  // time for client
-  delay(1);
-  client.stop();
 }
