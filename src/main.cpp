@@ -36,7 +36,7 @@
 #define MX_RELEASE MX_DDR &= ~MX_BITMASK;
 
 #define MX_REFRESH_TIME 60000
-#define MX_SPI_SPEED_MAX 125000
+#define MX_SPI_SPEED_MAX 4000000
 
 #define MX_DISPLAY_L1 0
 #define MX_DISPLAY_L2 1
@@ -110,8 +110,8 @@ const byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
 const IPAddress selfIp(SELF_IP);
 const IPAddress mqttServerIp(MQTT_SERVER_IP);
 
-EthernetClient ethClient;
-PubSubClient mqttClient(ethClient);
+EthernetClient eth;
+PubSubClient mqttClient(eth);
 uint32_t mqttLastReconnectAttempt = 0;
 uint32_t lastPresence = 0;
 uint32_t lastWaterTemp = 0;
@@ -127,10 +127,10 @@ uint8_t mxIntensity = MX_DEFAULT_INTENSITY;
 uint8_t programId = PROGRAM_ID_INIT;
 
 uint32_t wsLastRequest = 0;
-uint16_t wsInterval = 0;
+uint32_t wsInterval = 0;
 
 uint32_t mxLastRequest = 0;
-uint16_t mxInterval = 0;
+uint32_t mxInterval = 0;
 
 uint8_t mxMatrix[MX_SCREEN_COUNT][MX_DISPLAY_COUNT][MX_DEVICE_COUNT][MX_ROW_COUNT];
 char mxChar[MX_CHAR_COUNT];
@@ -380,9 +380,15 @@ inline void btnRead(){
 }
 
 bool mqttReconnect() {
-  String clientId = CLIENT_ID_PREFIX;
-  clientId += String(random(0xffff), HEX);
-  if (mqttClient.connect(clientId.c_str())) {
+  uint8_t iii;
+  uint8_t charPos;
+  char clientId[10] = CLIENT_ID_PREFIX;
+  for (iii = 0; iii < 4; iii++){
+    charPos = strlen(clientId);
+    clientId[charPos] = '0' + random(0, 10);
+    clientId[charPos + 1] = '\0';
+  }
+  if (mqttClient.connect(clientId)) {
     mqttClient.subscribe(SUB_SET_INTENSITY);
     mqttClient.subscribe(SUB_SET_RED);
     mqttClient.subscribe(SUB_SET_GREEN);
@@ -395,18 +401,32 @@ bool mqttReconnect() {
   return mqttClient.connected();
 }
 
-void formatTemp(char* temp){
+void formatTemp(char* temp, uint8_t len){
+  char msg[8];
   float fl;
-  int16_t int_t;
-  uint8_t len;
-
-  fl = atof(temp);
-  int_t = round(fl * 10);
-  itoa(int_t, mxChar, 10);
-  len = strlen(mxChar);
-  mxChar[len + 1] = '\0';
-  mxChar[len] = mxChar[len - 1];
-  mxChar[len - 1] = ',';
+  int ifl;
+  int ihec;
+  char m1[4];
+  strncpy(msg, temp, len);
+  msg[len] = '\0';
+  fl = atof(msg);
+  fl *= 100;
+  if (fl < 0){
+    strcpy(mxChar, "-");
+  } else {
+    strcpy(mxChar, "");
+  }
+  fl = abs(fl);
+  fl = floor(fl);
+  fl = round(fl / 10);
+  fl /= 10;
+  ifl = (int) floorf(fl);
+  itoa(ifl, m1, 10);
+  strcat(mxChar, m1);
+  strcat(mxChar, ",");
+  ihec = (int) round((fl - ifl) * 10);
+  itoa(ihec, m1, 10);
+  strcat(mxChar, m1);
 }
 
 inline void mxCalcDataLine1(){
@@ -426,8 +446,9 @@ inline void mxCalcDataLine2(){
 }
 
 void mqttCallback(char* topic, char* payload, unsigned int length) {
+  uint8_t iii;
+
   #ifdef SERIAL_EN
-    uint8_t iii;
     Serial.print("sub rec: ");
     Serial.print(topic);
     Serial.print(" : ");
@@ -437,7 +458,7 @@ void mqttCallback(char* topic, char* payload, unsigned int length) {
   #endif
 
   if (strcmp(topic, SUB_WATER_TEMP) == 0){
-    formatTemp(payload);
+    formatTemp(payload, length);
     mxCalcDataLine1();
     mxInterval = 0;
     lastWaterTemp = millis();
@@ -445,7 +466,7 @@ void mqttCallback(char* topic, char* payload, unsigned int length) {
   }
 
   if (strcmp(topic, SUB_AIR_TEMP) == 0){
-    formatTemp(payload);
+    formatTemp(payload, length);
     mxCalcDataLine2();
     mxInterval = 0;  
     lastAirTemp = millis();

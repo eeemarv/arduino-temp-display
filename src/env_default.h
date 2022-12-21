@@ -25,7 +25,7 @@
   #define MQTT_CONNECT_RETRY_TIME 5000
 #endif
 #ifndef SERIAL_BAUD 
-  #define SERIAL_BAUD 9600
+  #define SERIAL_BAUD 115200
 #endif
 
 #ifndef CLIENT_ID_PREFIX
@@ -61,18 +61,13 @@
 #endif
 
 #ifndef WATER_TEMP_VALID_TIME
-  #define WATER_TEMP_VALID_TIME 30000
+  #define WATER_TEMP_VALID_TIME 60000
 #endif
 #ifndef AIR_TEMP_VALID_TIME
-  #define AIR_TEMP_VALID_TIME 30000
+  #define AIR_TEMP_VALID_TIME 60000
 #endif
 #ifndef PRESENCE_TIME 
   #define PRESENCE_TIME 2000
 #endif
-#ifndef WATER_TEMP_VALID_TIME 
-  #define WATER_TEMP_VALID_TIME 60000
-#endif
-#ifndef AIR_TEMP_VALID_TIME 
-  #define AIR_TEMP_VALID_TIME 60000
-#endif
+
 
