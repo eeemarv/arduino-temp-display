@@ -407,6 +407,9 @@ void formatTemp(char* temp, uint8_t len){
   strncpy(msg, temp, len);
   msg[len] = '\0';
   snprintf(mxChar, sizeof(mxChar), "%.1f", atof(msg));
+  if (strcmp(mxChar, "-0.0") == 0){
+    strcpy(mxChar, "0.0");
+  }
   for (iii = 0; iii < strlen(mxChar); iii++){
     if (mxChar[iii] == '.'){
       mxChar[iii] = ',';
