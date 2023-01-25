@@ -403,30 +403,15 @@ bool mqttReconnect() {
 
 void formatTemp(char* temp, uint8_t len){
   char msg[8];
-  float fl;
-  int ifl;
-  int ihec;
-  char m1[4];
+  uint8_t iii;
   strncpy(msg, temp, len);
   msg[len] = '\0';
-  fl = atof(msg);
-  fl *= 100;
-  if (fl < 0){
-    strcpy(mxChar, "-");
-  } else {
-    strcpy(mxChar, "");
+  snprintf(mxChar, sizeof(mxChar), "%.1f", atof(msg));
+  for (iii = 0; iii < strlen(mxChar); iii++){
+    if (mxChar[iii] == '.'){
+      mxChar[iii] = ',';
+    }
   }
-  fl = abs(fl);
-  fl = floor(fl);
-  fl = round(fl / 10);
-  fl /= 10;
-  ifl = (int) floorf(fl);
-  itoa(ifl, m1, 10);
-  strcat(mxChar, m1);
-  strcat(mxChar, ",");
-  ihec = (int) round((fl - ifl) * 10);
-  itoa(ihec, m1, 10);
-  strcat(mxChar, m1);
 }
 
 inline void mxCalcDataLine1(){
