@@ -147,13 +147,16 @@ inline void mxCharInit(){
 }
 
 inline void mxCharEmpty(){
-  mxChar[0] = '>';
-  mxChar[1] = '\0';
+  mxChar[0] = '.';
+  mxChar[1] = '.';
+  mxChar[2] = '\0';
 }
 
 inline void mxCharNoConnection(){
-  mxChar[0] = 'n';
-  mxChar[1] = '\0';
+  mxChar[0] = '.';
+  mxChar[1] = '.';
+  mxChar[2] = '.';
+  mxChar[3] = '\0';
 }
 
 inline void getProgramValuesFromEeprom(){
@@ -406,7 +409,9 @@ void formatTemp(char* temp, uint8_t len){
   uint8_t iii;
   strncpy(msg, temp, len);
   msg[len] = '\0';
-  snprintf(mxChar, sizeof(mxChar), "%.1f", atof(msg));
+  dtostrf(atof(msg), 3, 1, mxChar);
+  // does not work with floats in Arduino
+  // snprintf(mxChar, sizeof(mxChar), "%.1f", fl);
   if (strcmp(mxChar, "-0.0") == 0){
     strcpy(mxChar, "0.0");
   }
